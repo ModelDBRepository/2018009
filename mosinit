@@ -1,0 +1,356 @@
+load_file("nrngui.hoc")
+load_file("cellM1.hoc")
+
+cvode_active(1)
+
+tstop=1000
+cvode.event(tstop)
+
+celsius=34
+
+objref stim[2], syn[2], apc[2]
+objref synD[2][400], nt[2][2], nsD[2][400], ncD[2][400], ns, ncS[2], randDen
+
+double  vecAD[2][400], DistSD[2][400], DistSDm[2], dSDm[2], ds[2]
+double  tspk[2][1000], nspk[2], nspkm[2], f[2]
+double  tspkprec[2],tspknext[2],i_spk[2], phi[2]
+objref b, d, e
+objref b2,d2,e2
+strdef llab
+
+  Nexp    = 1    // Nr of simulations
+  wi      = 0.05 // synapse inhibition weight 
+  ws      = 5e-4 // synapse excitatory weight
+  Nsyn    = 20   // Nr of synapses in each soma  
+  ds[0]   = 100  // proximal synapse distance (fixed in the paper)
+  ds[1]   = 150  // distal   synapse distance (variable) 
+  Dsd     = 20   // width of the synapse distribution aroud their mean values ds[0] and ds[1]
+  chnoise = 1    // 1=Poisson distributed pulsed synaptic inputs
+  FreqInp = 60   // mean input frequency of the pulsed inputs 
+  del     = 2    // delay on the activation of the inhibitory response
+
+print "Nsyn=", Nsyn," wi=",wi," ws=",ws," ds0=",ds[0]," ds1=",ds[1]," Dsd=",Dsd," Noise=", chnoise," f=", FreqInp," Del=", del
+
+cs_traj=0
+SynLoc = 0.5
+xseed=16327
+print xseed
+
+N   = 2    //Num neurons
+objref NC[2]
+for j=0, N-1{
+	NC[j] = new CA1_PC_cAC_sig() 
+	NC[j].init()
+}
+
+Napic = 189 
+
+for j=1, N-1 {
+	NC[j].soma {
+	    print secname(), " Nsecs: ", n3d()
+    	for i=0,n3d()-1 { 
+	    	pt3dchange(i, x3d(i)+400, y3d(i), z3d(i), diam3d(i))
+		}
+	}
+}
+
+ns = new NetStim(0.5)      //Unique current pulse for all the synapses
+ns.number = 1000000
+//ns.interval = 20          //20ms -> 1/(20e-3) = 50 Hz
+ns.interval = 1000/FreqInp  //interval in ms
+ns.start = 10
+ns.noise = chnoise
+
+for m = 0, (N-1) NC[m].soma {
+    syn[m] = new ExpSyn(0.5)
+	syn[m].tau=30
+	syn[m].e  =-80
+	
+    nspk[m] =0
+    nspkm[m]=0
+
+    apc[m] = new APCount(.5)
+    apc[m].thresh=0
+}
+
+for m = 0, (N-1) {
+	for k = 0,(N-1) {
+		NC[m].soma nt[m][k] = new NetCon(&v(.5), syn[k], 0, del, wi)
+	}
+}
+
+mcell_ran4_init(xseed)
+rrr = mcell_ran4(&xseed)
+print rrr
+
+for l = 0, N-1 {
+   	tspkprec[l] = 0
+	tspknext[l] = 0
+    i_spk[l]= 0
+	l2=1
+   	while ( tspk[l][l2] > 0) {
+	    tspk[l][l2] = 0
+	    l2 = l2 + 1
+	} 
+}
+
+for i = 0,999 {
+    for j=0,N-1 {
+	   tspk[j][i]=0.
+    }
+}
+
+for i = 0,399 {
+    for j=0,N-1 {
+	   vecAD[j][i] = 0
+	   DistSD[j][i] = 0
+    }
+}
+
+
+kcommon=0
+mincommon = 0
+NspikesTot =0
+deltats = 0.0
+
+b = new VBox()
+b.intercept(1)
+
+	d = new Graph()
+	d.size(0,0.07,0,1)
+	d.xaxis(1)
+	d.exec_menu("10% Zoom out")
+	d.color(3)
+	d.label(0.43,0.93,"<Cr(t)>")
+	d.label(0.49,0.0,"iw (nS)")
+		
+	e = new Graph()
+	e.size(0,1000,0,50)
+	e.xaxis(1)
+	e.exec_menu("10% Zoom out")
+	e.color(5)
+	e.label(0.45,0.93,"N_spikes")
+	e.label(0.49,0.0,"t (ms)")
+	
+	xpanel("")
+	xbutton("Shuffle syn. & reRun ", "runm()")
+	xpanel()
+	xpanel("variables")
+	xvalue("inter-soma Synaptic Inhibition - wi","wi",0,"wca()")
+	xvalue("Dendr Net Synaptic Conductance - ws","ws",0,"wca()")
+	xpanel()
+	
+b.intercept(0)
+b.map()
+
+
+proc advance() {    //Neuron time process
+	fadvance()      //each dt increment 
+
+    for l = 0, N-1 {
+		if ( apc[l].n > nspk[l] ) {  
+            
+    		 nspk[l] = apc[l].n 
+    		 tspk[l][nspk[l]] = t
+    		 NspikesTot = NspikesTot + 1
+
+    		 if (l == 0) e.mark(t,nspk[l],"o",8,1,1)
+    		 if (l == 1) e.mark(t,nspk[l],"t",8,1,1)
+    		 e.flush
+    	}
+	}
+    
+    tp=t
+}
+
+
+proc wca() {
+	for k = 0, N-1 {
+		for m = 0, N-1 {
+      		nt[k][m].weight=wi
+		}
+	}
+}
+
+proc CreateShuffleSyn() {
+
+for m=0,N-1 {
+	access NC[m].soma
+	distance()
+	dm=0
+	for j=0,(Nsyn-1)  {
+
+		k=0
+		while(k==0){
+    		indAD = int(Napic*mcell_ran4(&xseed)) 
+ 			rrr = mcell_ran4(&xseed)
+
+ 			NC[m].apic[indAD] {
+ 				if ( distance(rrr) > (ds[m]-Dsd/2) && distance(rrr) < (ds[m]+Dsd/2) && diam(rrr) < 1.2 ) {
+					k=1
+//  				print indAD, distance(rrr) 
+    	    	}
+			}
+		}
+	    access NC[m].apic[indAD] 
+
+	   	synD[m][j] = new Exp2Syn(rrr)
+   		synD[m][j].tau1 = 0.5    
+	   	synD[m][j].tau2 = 3      
+   		synD[m][j].e    = 0      
+   		ncD[m][j] = new NetCon(ns,synD[m][j],0,0,ws) 
+
+	    DistSD[m][j] = distance(rrr)
+		dm = dm + DistSD[m][j]
+	}
+	DistSDm[m] = dm/Nsyn
+}
+print "      Synapsis shuffling - dSm[0] = ",DistSDm[0], " - dSm[1] = ",DistSDm[1] 
+print "                   Frequency (Hz) = ",1000/ns.interval, " - ISI (ms) = ",ns.interval
+print "                               ws = ",ws, " - wi = ",wi, " - delay = ",del
+}
+
+
+proc runMain() {
+
+    CreateShuffleSyn()
+	
+    CS_me      = 0.0
+    CS2_me     = 0.0
+
+	for k = 0, N-1 {
+
+		for j=0,Nsyn-1 {
+	    	ncD[k][j].weight = ws
+		}
+		for m = 0, N-1 {
+      		nt[k][m].weight=wi
+		}
+		apc[k].n      = 0
+		f[k]          = 0.0
+		nspkm[k]      = 0
+ 	}
+
+
+   	for k = 0, N-1 {
+		dSDm[k] = 0
+	}
+    DPhim  = 0.0
+    DPhim2 = 0.0
+
+	for ke = 0, Nexp -1 {
+
+        Ne = ke + 1 
+		if( ke > 0 ) {
+	    	for k = 0, N-1 {
+				DistSDm[k] = 0
+			}
+			CreateShuffleSyn()
+		}
+    	
+		run()
+		
+		for k = 0, N-1 {
+            dSDm[k] = dSDm[k] + DistSDm[k]
+			if ( apc[k].time > 0 ) {f[k] = f[k] + nspk[k]/apc[k].time*1000}
+			nspkm[k] = nspkm[k] + nspk[k]
+		}
+		
+		d.beginline()
+        tmax = tspk[0][nspk[0]]
+        if ( tmax > tspk[1][nspk[1]] ) { tmax = tspk[1][nspk[1]] }
+		ttt = 0
+		ddt = 0.1
+		Ntsteps = 0
+		DeltaPhim = 0
+		
+    	for l = 0, N-1 {
+			i_spk[l] = 0
+			tspknext[l]  = tspk[l][i_spk[l]+1]
+		}
+		
+   		phi[0]=mcell_ran4(&xseed)*6.283184   
+   		phi[1]=mcell_ran4(&xseed)*6.283184   
+		cs_med = 0.0
+
+		while ( ttt < tmax ) {
+
+	   		phi[0]=mcell_ran4(&xseed)*6.283184
+   			phi[1]=mcell_ran4(&xseed)*6.283184
+
+			if (nspk[0] >1 && nspk[1] >1) {
+	    	for l = 0, N-1 {
+
+		        if ( ttt >= tspk[l][i_spk[l]+1] ) {
+		            i_spk[l] = i_spk[l] + 1
+		            tspkprec[l] = tspk[l][i_spk[l]] 
+		            tspknext[l] = tspk[l][i_spk[l]+1] 
+	    		}
+
+		  	    if ( (tspkprec[l] != tspknext[l]) ) {
+		    		phi[l]=0    // rnd:22/05/2023
+		  	        if  (ttt < tspknext[l]) {
+			  	        phi[l] = 2.*3.141592 * (ttt - tspkprec[l]) / (tspknext[l] - tspkprec[l])
+					}
+    			}
+    		}
+			}
+		
+    		// in each step, updates the phase difference
+    		DeltaPhim = DeltaPhim + (phi[1]-phi[0])*ddt
+			cs_med =  cs_med + cos( (phi[1]-phi[0]) ) * ddt
+		    ttt = ttt + ddt
+		    Ntsteps = Ntsteps + 1
+            
+		}
+		
+//	   		print tmax, nspk[0], nspk[1]
+        if (tmax == 0) {
+            ttt=1
+	        cs_med = cos( (phi[1]-phi[0]) )
+	        DeltaPhim = (phi[1]-phi[0])
+        }
+        cs_traj = cs_med/ttt
+		CS_me   = CS_me + cs_traj
+		DPhim   = DPhim  + DeltaPhim/ttt
+		CS2_me    = CS2_me + cs_traj * cs_traj
+		DPhim2    = DPhim2  + DeltaPhim/ttt * DeltaPhim/ttt
+
+        varCS = abs(CS2_me/Ne - CS_me/Ne * CS_me/Ne)
+        varPH = abs(DPhim2/Ne - DPhim/Ne * DPhim/Ne)
+		
+		CS_sig    = sqrt(varCS)
+		DPhim_sig = sqrt(varPH)
+
+        print "k Nsy Ns0 Ns1 - ws  wi     f1       f2    dSDm[0]/Ne dSDm[1]/Ne     dPhi    Ck    C_sig dPhi_sig delay"
+    	print Ne,Nsyn,nspkm[0]/Ne,nspkm[1]/Ne,ws,wi,f[0]/Ne,f[1]/Ne,dSDm[0]/Ne,dSDm[1]/Ne,DPhim/Ne,cs_traj,CS_sig,DPhim_sig,del
+    	print "           Cm = ", CS_me/Ne
+
+         
+	    NspikesTot= 0
+    	for l = 0, N-1 {
+ 
+    		nspk[l]=0
+	    	tspkprec[l] =0
+    		tspknext[l] =0
+    		l2=1
+	    	while ( tspk[l][l2] > 0) {
+			    tspk[l][l2] = 0
+			    l2 = l2 + 1
+			}
+			apc[l].n=0 
+    	}
+
+	   	d.mark(wi,CS_me/Ne,"o",8,1,1.5)
+		d.label(0.49,0.0,llab)
+   		d.flush
+
+	}
+
+	xval = wi
+
+}   // fine runMain
+
+load_file("Ses_t1000.ses")
+
+runMain()
